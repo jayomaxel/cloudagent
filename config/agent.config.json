@@ -1,0 +1,32 @@
+{
+  "baseToken": "WGq3bSaOga59t5sXtRBch647nBh",
+  "tables": {
+    "members": "成员档案",
+    "projects": "项目库",
+    "projectMemberships": "项目成员关系",
+    "chatConfig": "Agent 群聊配置",
+    "evidence": "Agent 贡献证据",
+    "actions": "Agent 行动项",
+    "decisions": "Agent 决策记录",
+    "drafts": "Agent 文档审核"
+  },
+  "batch": {
+    "maxMessages": 25,
+    "windowSeconds": 600,
+    "flushIntervalSeconds": 30,
+    "configRefreshSeconds": 60
+  },
+  "privacy": {
+    "allowAllChats": false,
+    "ignoreBots": true,
+    "minimumContentLength": 4,
+    "storeRawMessages": false,
+    "retentionDays": 90
+  },
+  "documents": {
+    "createDraftDocuments": true,
+    "parentToken": "",
+    "titlePrefix": "[AI 草稿] "
+  },
+  "agentVersion": "0.2.0"
+}

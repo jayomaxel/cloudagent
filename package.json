@@ -1,0 +1,19 @@
+{
+  "name": "cloudagent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI Coding Studio 飞书项目管理 Agent",
+  "scripts": {
+    "agent": "node src/index.js listen",
+    "doctor": "node src/index.js doctor",
+    "bootstrap": "node scripts/bootstrap-agent-base.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "openai": "latest",
+    "zod": "latest"
+  }
+}

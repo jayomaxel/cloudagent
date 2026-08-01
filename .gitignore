@@ -1,0 +1,8 @@
+node_modules/
+.env
+.data/
+.codex-lark-utf8-fix/
+agent-base-result.json
+feishu-*-result.json
+feishu-*-state.json
+npm-debug.log*
