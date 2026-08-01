@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "AI Coding Studio 飞书项目管理 Agent",
+  "license": "MIT",
   "scripts": {
     "agent": "node src/index.js listen",
     "doctor": "node src/index.js doctor",
