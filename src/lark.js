@@ -59,6 +59,49 @@ export class LarkClient {
     return this.runJson(args);
   }
 
+  listChatMessages(chatId, options = {}) {
+    const start = options.start || "";
+    const end = options.end || "";
+    const pageSize = Math.min(Math.max(Number(options.pageSize) || 50, 1), 50);
+    const maxPages = Math.max(Number(options.maxPages) || 200, 1);
+    const messages = [];
+    let pageToken = "";
+    let pages = 0;
+    let hasMore = false;
+
+    while (pages < maxPages) {
+      const args = [
+        "im", "+chat-messages-list",
+        "--as", options.identity || "user",
+        "--chat-id", chatId,
+        "--order", "asc",
+        "--page-size", String(pageSize),
+        "--no-reactions"
+      ];
+      if (start) args.push("--start", start);
+      if (end) args.push("--end", end);
+      if (pageToken) args.push("--page-token", pageToken);
+
+      const output = this.runJson(args);
+      const payload = output.data ?? output;
+      const pageMessages = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload.messages)
+          ? payload.messages
+          : Array.isArray(payload.items)
+            ? payload.items
+            : [];
+      messages.push(...pageMessages);
+      pages += 1;
+      hasMore = Boolean(payload.has_more ?? output.has_more);
+      const nextPageToken = payload.page_token || output.page_token || "";
+      if (!hasMore || !nextPageToken) break;
+      pageToken = nextPageToken;
+    }
+
+    return { messages, pages, truncated: hasMore };
+  }
+
   createRecords(tableName, records) {
     if (!records.length) return null;
     const outputs = [];
@@ -69,6 +112,24 @@ export class LarkClient {
         "--table-id", tableName,
         "--as", "user",
         "--json", JSON.stringify({ create_records: records.slice(index, index + 200) })
+      ]));
+    }
+    return outputs;
+  }
+
+  updateRecords(tableName, updatesByRecordId) {
+    const entries = Object.entries(updatesByRecordId);
+    if (!entries.length) return null;
+    const outputs = [];
+    for (let index = 0; index < entries.length; index += 200) {
+      outputs.push(this.runJson([
+        "base", "+record-batch-update",
+        "--base-token", this.baseToken,
+        "--table-id", tableName,
+        "--as", "user",
+        "--json", JSON.stringify({
+          update_records: Object.fromEntries(entries.slice(index, index + 200))
+        })
       ]));
     }
     return outputs;
@@ -95,10 +156,10 @@ export class LarkClient {
     }
   }
 
-  async startMessageStream(onMessage) {
+  async startEventStream(eventKey, onEvent) {
     const child = spawn(process.execPath, [
       this.entry,
-      "event", "consume", "im.message.receive_v1",
+      "event", "consume", eventKey,
       "--as", "bot"
     ], {
       cwd: this.config.root,
@@ -124,7 +185,9 @@ export class LarkClient {
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
-          onMessage(JSON.parse(line));
+          Promise.resolve(onEvent(JSON.parse(line))).catch((error) => {
+            console.error(`[agent] 处理飞书事件 ${eventKey} 失败`, error.message);
+          });
         } catch (error) {
           console.error("[agent] 无法解析飞书事件", error.message);
         }
@@ -132,7 +195,7 @@ export class LarkClient {
     });
     child.stderr.on("data", (chunk) => {
       stderrBuffer += chunk;
-      if (stderrBuffer.includes("[event] ready event_key=im.message.receive_v1")) readyResolve();
+      if (stderrBuffer.includes(`[event] ready event_key=${eventKey}`)) readyResolve();
       process.stderr.write(chunk);
     });
     child.on("exit", (code) => {
@@ -148,5 +211,19 @@ export class LarkClient {
         if (!child.killed) child.stdin.end();
       }
     };
+  }
+
+  async startEventStreams(streams) {
+    const handles = await Promise.all(
+      streams.map(({ eventKey, onEvent }) => this.startEventStream(eventKey, onEvent))
+    );
+    return {
+      handles,
+      stop: () => handles.forEach((handle) => handle.stop())
+    };
+  }
+
+  async startMessageStream(onMessage) {
+    return this.startEventStream("im.message.receive_v1", onMessage);
   }
 }

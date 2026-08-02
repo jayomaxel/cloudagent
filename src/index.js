@@ -30,6 +30,36 @@ async function doctor(config, lark) {
   }, null, 2));
 }
 
+function optionValue(name) {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] || "" : "";
+}
+
+function optionValues(name) {
+  return process.argv
+    .flatMap((value, index) => value === name ? [process.argv[index + 1] || ""] : [])
+    .flatMap((value) => value.split(",").map((item) => item.trim()).filter(Boolean));
+}
+
+async function backfill(config, lark) {
+  const start = optionValue("--start");
+  const end = optionValue("--end") || new Date().toISOString();
+  if (!start) throw new Error("历史补读需要指定 --start，例如 2026-08-01T00:00:00+08:00");
+  const agent = new StudioAgent(config, lark);
+  const result = await agent.backfill({
+    start,
+    end,
+    chatIds: optionValues("--chat-id")
+  });
+  console.log(JSON.stringify(result, null, 2));
+}
+
+async function syncIdentities(config, lark) {
+  const agent = new StudioAgent(config, lark);
+  const result = await agent.syncEvidenceIdentities();
+  console.log(JSON.stringify(result, null, 2));
+}
+
 async function main() {
   const config = loadConfig();
   const lark = new LarkClient(config);
@@ -37,6 +67,14 @@ async function main() {
 
   if (command === "doctor") {
     await doctor(config, lark);
+    return;
+  }
+  if (command === "backfill") {
+    await backfill(config, lark);
+    return;
+  }
+  if (command === "sync-identities") {
+    await syncIdentities(config, lark);
     return;
   }
   if (command !== "listen") throw new Error(`未知命令：${command}`);

@@ -19,6 +19,43 @@ const SYSTEM_PROMPT = `
 11. 语言简洁、事实导向；无法判断截止日期时 due_date 返回空字符串。
 `;
 
+const OUTPUT_TEMPLATE = `
+必须严格返回以下 JSON 结构，字段名只能使用英文键名；没有证据的数组必须返回空数组：
+{
+  "project_summary": "string",
+  "contributions": [{
+    "member_open_id": "ou_xxx",
+    "contribution_type": "技术实现|项目推进|产品需求|协作支持|知识沉淀|风险担当|组织贡献",
+    "evidence_summary": "string",
+    "message_ids": ["om_xxx"],
+    "confidence": 0.0,
+    "needs_human_review": true
+  }],
+  "actions": [{
+    "owner_open_id": "ou_xxx",
+    "action": "string",
+    "due_date": "string",
+    "source_message_ids": ["om_xxx"],
+    "confidence": 0.0
+  }],
+  "decisions": [{
+    "title": "string",
+    "decision": "string",
+    "rationale": "string",
+    "participant_open_ids": ["ou_xxx"],
+    "source_message_ids": ["om_xxx"],
+    "confidence": 0.0
+  }],
+  "document_drafts": [{
+    "title": "string",
+    "document_type": "项目周报|决策记录|技术知识|项目复盘|SOP修订建议|成员成长观察",
+    "content_xml": "string",
+    "source_message_ids": ["om_xxx"],
+    "risk_level": "低|中|高"
+  }]
+}
+`;
+
 export class Analyzer {
   constructor(config) {
     if (!config.aiApiKey) {
@@ -49,19 +86,33 @@ export class Analyzer {
 
     if (this.provider === "deepseek") {
       let lastError;
+      let lastContent = "";
       for (let attempt = 1; attempt <= 2; attempt += 1) {
         try {
+          const messages = attempt === 1
+            ? [
+              { role: "system", content: `${SYSTEM_PROMPT}\n${OUTPUT_TEMPLATE}` },
+              { role: "user", content: JSON.stringify(payload) }
+            ]
+            : [
+              {
+                role: "system",
+                content: `${SYSTEM_PROMPT}\n${OUTPUT_TEMPLATE}\n你正在修复一次不合规的 JSON。不要解释，只返回修复后的完整 JSON。`
+              },
+              {
+                role: "user",
+                content: `请将下面内容修复为严格符合模板的 JSON。不得丢失可确认的 message_id 和 sender_open_id；无法确认的字段使用空字符串、空数组或 needs_human_review=true。\n\n${lastContent.slice(0, 24000)}`
+              }
+            ];
           const response = await this.client.chat.completions.create({
             model: this.model,
-            messages: [
-              { role: "system", content: SYSTEM_PROMPT },
-              { role: "user", content: JSON.stringify(payload) }
-            ],
+            messages,
             response_format: { type: "json_object" },
             max_tokens: 12000
           });
           const content = response.choices[0]?.message?.content?.trim();
           if (!content) throw new Error("DeepSeek 返回了空内容");
+          lastContent = content;
           return ProjectActivityAnalysis.parse(JSON.parse(content));
         } catch (error) {
           lastError = error;

@@ -16,12 +16,36 @@
     "flushIntervalSeconds": 30,
     "configRefreshSeconds": 60
   },
+  "autoEnroll": {
+    "enabled": true,
+    "defaultProjectName": "待归属项目",
+    "allowDocumentDrafts": false
+  },
   "privacy": {
     "allowAllChats": false,
     "ignoreBots": true,
     "minimumContentLength": 4,
     "storeRawMessages": false,
-    "retentionDays": 90
+    "retentionDays": 90,
+    "excludedChatIds": [
+      "oc_e63781fc088d790d4ff2e090ad046bbf"
+    ]
+  },
+  "history": {
+    "enabled": true,
+    "identity": "user",
+    "autoBackfillOnStart": true,
+    "autoBackfillDays": 2,
+    "includeAllEnabledChats": true,
+    "autoBackfillChatIds": [],
+    "allowedChatIds": [
+      "oc_9031d77f59b4793c0dbf2594cd90681b",
+      "oc_9134db54ac336d6aa8e5b21f0e18cbfa",
+      "oc_5eede6a837200734501c1c2d3576dc5d"
+    ],
+    "pageSize": 50,
+    "maxPages": 200,
+    "stateFile": ".data/processed-message-ids.json"
   },
   "documents": {
     "createDraftDocuments": true,

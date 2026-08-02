@@ -8,6 +8,8 @@
   "scripts": {
     "agent": "node src/index.js listen",
     "doctor": "node src/index.js doctor",
+    "backfill": "node src/index.js backfill",
+    "sync-identities": "node src/index.js sync-identities",
     "bootstrap": "node scripts/bootstrap-agent-base.js"
   },
   "engines": {
