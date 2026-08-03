@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
-import { ProjectActivityAnalysis } from "./schema.js";
+import { NotificationSummary, ProjectActivityAnalysis } from "./schema.js";
 
 const SYSTEM_PROMPT = `
 你是 AI Coding Studio 的透明项目观察与复盘 Agent。你只分析项目工作行为，不进行人格、品德、心理或能力定性。
@@ -53,6 +53,19 @@ const OUTPUT_TEMPLATE = `
     "source_message_ids": ["om_xxx"],
     "risk_level": "低|中|高"
   }]
+}
+`;
+
+const NOTIFICATION_SUMMARY_TEMPLATE = `
+你正在为飞书群生成一条正式通知摘要。只总结通知内容，不分析成员，不评价任何人。
+必须隐藏密码、API Key、access token、账号口令、验证码等敏感信息；如原文包含此类内容，用“已隐藏敏感信息”代替。
+必须严格返回以下 JSON：
+{
+  "title": "不超过24字的通知标题",
+  "summary": "80到180字的通知摘要",
+  "key_points": ["要点1", "要点2"],
+  "action_items": ["需要成员执行的事项"],
+  "deadline": "可确认的截止时间；无法确认则为空字符串"
 }
 `;
 
@@ -130,6 +143,45 @@ export class Analyzer {
       text: { format: zodTextFormat(ProjectActivityAnalysis, "project_activity_analysis") }
     });
     if (!response.output_parsed) throw new Error("OpenAI 没有返回结构化分析结果");
+    return response.output_parsed;
+  }
+
+  async summarizeNotification({ projectName, chatName, messages }) {
+    const payload = {
+      project: projectName,
+      chat_name: chatName,
+      messages: messages.map((message) => ({
+        message_id: message.message_id,
+        sender_open_id: message.sender_id,
+        create_time: message.create_time,
+        content: message.content
+      }))
+    };
+
+    if (this.provider === "deepseek") {
+      const response = await this.client.chat.completions.create({
+        model: this.model,
+        messages: [
+          { role: "system", content: NOTIFICATION_SUMMARY_TEMPLATE },
+          { role: "user", content: JSON.stringify(payload) }
+        ],
+        response_format: { type: "json_object" },
+        max_tokens: 3000
+      });
+      const content = response.choices[0]?.message?.content?.trim();
+      if (!content) throw new Error("DeepSeek 返回了空通知摘要");
+      return NotificationSummary.parse(JSON.parse(content));
+    }
+
+    const response = await this.client.responses.parse({
+      model: this.model,
+      input: [
+        { role: "system", content: NOTIFICATION_SUMMARY_TEMPLATE },
+        { role: "user", content: JSON.stringify(payload) }
+      ],
+      text: { format: zodTextFormat(NotificationSummary, "notification_summary") }
+    });
+    if (!response.output_parsed) throw new Error("OpenAI 没有返回通知摘要");
     return response.output_parsed;
   }
 }

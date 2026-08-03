@@ -60,6 +60,13 @@ async function syncIdentities(config, lark) {
   console.log(JSON.stringify(result, null, 2));
 }
 
+async function syncMembers(config, lark) {
+  const agent = new StudioAgent(config, lark);
+  await agent.refreshRuntimeMappings();
+  const result = await agent.syncManagedGroups({ notifyNewMembers: false });
+  console.log(JSON.stringify(result, null, 2));
+}
+
 async function main() {
   const config = loadConfig();
   const lark = new LarkClient(config);
@@ -75,6 +82,10 @@ async function main() {
   }
   if (command === "sync-identities") {
     await syncIdentities(config, lark);
+    return;
+  }
+  if (command === "sync-members") {
+    await syncMembers(config, lark);
     return;
   }
   if (command !== "listen") throw new Error(`未知命令：${command}`);

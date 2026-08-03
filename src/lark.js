@@ -102,6 +102,53 @@ export class LarkClient {
     return { messages, pages, truncated: hasMore };
   }
 
+  listChatMemberUsers(chatId) {
+    const output = this.runJson([
+      "im", "+chat-members-list",
+      "--chat-id", chatId,
+      "--member-types", "user",
+      "--page-all",
+      "--as", "bot"
+    ]);
+    const payload = output.data ?? output;
+    const users = Array.isArray(payload.users)
+      ? payload.users
+      : Array.isArray(payload.items)
+        ? payload.items
+        : Array.isArray(payload.members)
+          ? payload.members
+          : [];
+    return users
+      .map((user) => ({
+        id: user.id || user.open_id || user.user_id || user.member_id || "",
+        name: user.name || user.display_name || user.member_name || ""
+      }))
+      .filter((user) => user.id.startsWith("ou_"));
+  }
+
+  readMessageUsers(messageId) {
+    const output = this.runJson([
+      "im", "messages", "read_users",
+      "--as", "bot",
+      "--message-id", messageId,
+      "--user-id-type", "open_id",
+      "--page-size", "100",
+      "--page-all"
+    ]);
+    const payload = output.data ?? output;
+    const items = Array.isArray(payload.items)
+      ? payload.items
+      : Array.isArray(payload.data)
+        ? payload.data
+        : [];
+    return items
+      .map((item) => ({
+        id: item.user_id || item.open_id || item.id || "",
+        readAt: item.timestamp || ""
+      }))
+      .filter((item) => item.id.startsWith("ou_"));
+  }
+
   createRecords(tableName, records) {
     if (!records.length) return null;
     const outputs = [];
@@ -133,6 +180,55 @@ export class LarkClient {
       ]));
     }
     return outputs;
+  }
+
+  sendMarkdown(chatId, markdown, idempotencyKey) {
+    const args = [
+      "im", "+messages-send",
+      "--as", "bot",
+      "--chat-id", chatId,
+      "--markdown", markdown
+    ];
+    if (idempotencyKey) args.push("--idempotency-key", idempotencyKey.slice(0, 50));
+    return this.runJson(args);
+  }
+
+  sendPrivateText(openId, text, idempotencyKey) {
+    const args = [
+      "im", "+messages-send",
+      "--as", "bot",
+      "--user-id", openId,
+      "--text", text
+    ];
+    if (idempotencyKey) args.push("--idempotency-key", idempotencyKey.slice(0, 50));
+    return this.runJson(args);
+  }
+
+  createTask({ summary, description = "", assignee, due, tasklistId = "", idempotencyKey = "" }) {
+    const args = [
+      "task", "+create",
+      "--as", "bot",
+      "--summary", summary,
+      "--assignee", assignee,
+      "--due", due
+    ];
+    if (description) args.push("--description", description);
+    if (tasklistId) args.push("--tasklist-id", tasklistId);
+    if (idempotencyKey) args.push("--idempotency-key", idempotencyKey.slice(0, 50));
+    return this.runJson(args);
+  }
+
+  createCalendarEvent({ summary, start, end, attendeeIds = [], description = "" }) {
+    const args = [
+      "calendar", "+create",
+      "--as", "bot",
+      "--summary", summary,
+      "--start", start,
+      "--end", end
+    ];
+    if (attendeeIds.length) args.push("--attendee-ids", attendeeIds.join(","));
+    if (description) args.push("--description", description);
+    return this.runJson(args);
   }
 
   createDraftDocument(title, contentXml) {

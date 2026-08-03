@@ -52,3 +52,11 @@ export const ProjectActivityAnalysis = z.object({
     risk_level: z.enum(["低", "中", "高"])
   }))
 });
+
+export const NotificationSummary = z.object({
+  title: z.string(),
+  summary: z.string(),
+  key_points: z.array(z.string()),
+  action_items: z.array(z.string()),
+  deadline: z.string()
+});

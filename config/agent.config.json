@@ -8,7 +8,10 @@
     "evidence": "Agent 贡献证据",
     "actions": "Agent 行动项",
     "decisions": "Agent 决策记录",
-    "drafts": "Agent 文档审核"
+    "drafts": "Agent 文档审核",
+    "notifications": "Agent 通知追踪",
+    "notificationReads": "Agent 通知阅读明细",
+    "responseMetrics": "Agent 讨论响应监控"
   },
   "batch": {
     "maxMessages": 25,
@@ -52,5 +55,80 @@
     "parentToken": "",
     "titlePrefix": "[AI 草稿] "
   },
-  "agentVersion": "0.2.0"
+  "notifications": {
+    "enabled": true,
+    "publisherOpenIds": [
+      "ou_10aa90c9cba9aaa057c8a36fd5c9e547"
+    ],
+    "idleMinutes": 5,
+    "sendSummaryToGroup": true,
+    "triggerPrefixes": [
+      "【通知】",
+      "【安排】",
+      "【任务】",
+      "#通知",
+      "#安排",
+      "#任务"
+    ],
+    "readTracking": {
+      "enabled": true,
+      "syncIntervalMinutes": 10,
+      "trackingDays": 7,
+      "reminderAfterHours": 8,
+      "sendPrivateReminder": true,
+      "remindOnlyOnce": true
+    }
+  },
+  "responseTracking": {
+    "enabled": true,
+    "maxSequentialGapMinutes": 360,
+    "slowReplyMinutes": 120
+  },
+  "memberGovernance": {
+    "enabled": true,
+    "syncIntervalMinutes": 30,
+    "profileReminderIntervalHours": 24,
+    "profileReminderRepeatDays": 7,
+    "memberProfileFormUrl": "https://jcnm664gccao.feishu.cn/base/WGq3bSaOga59t5sXtRBch647nBh?table=tblxmtpseZxi9LET&view=vewYarXU02",
+    "groups": [
+      {
+        "chatId": "oc_9031d77f59b4793c0dbf2594cd90681b",
+        "chatName": "开发组",
+        "type": "team"
+      },
+      {
+        "chatId": "oc_9134db54ac336d6aa8e5b21f0e18cbfa",
+        "chatName": "飞书云agent",
+        "type": "project",
+        "projectName": "飞书云agent"
+      },
+      {
+        "chatId": "oc_5eede6a837200734501c1c2d3576dc5d",
+        "chatName": "AIMI智能体设计",
+        "type": "project",
+        "projectName": "AIMI智能体"
+      },
+      {
+        "chatId": "oc_f169f7167d80450338a4f37943822544",
+        "chatName": "五洲项目",
+        "type": "project",
+        "projectName": "五洲项目"
+      }
+    ]
+  },
+  "automationCommands": {
+    "enabled": true,
+    "operatorOpenIds": [
+      "ou_10aa90c9cba9aaa057c8a36fd5c9e547"
+    ],
+    "task": {
+      "enabled": true,
+      "tasklistId": ""
+    },
+    "calendar": {
+      "enabled": true,
+      "defaultDurationMinutes": 30
+    }
+  },
+  "agentVersion": "0.3.0"
 }

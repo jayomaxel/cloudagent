@@ -68,6 +68,90 @@ function membershipKey(projectName, openId) {
   return `${String(projectName || "").trim()}::${openId}`;
 }
 
+function messageTimeMs(message) {
+  const raw = String(message?.create_time || Date.now());
+  const numeric = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (Number.isFinite(numeric)) return numeric < 100000000000 ? numeric * 1000 : numeric;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+const DEFAULT_NOTIFICATION_PREFIXES = ["【通知】", "【安排】", "【任务】", "#通知", "#安排", "#任务"];
+
+function notificationPrefixes(config) {
+  const configured = config.notifications?.triggerPrefixes;
+  return Array.isArray(configured) && configured.length ? configured : DEFAULT_NOTIFICATION_PREFIXES;
+}
+
+function startsWithNotificationPrefix(content, config) {
+  const text = String(content || "").trimStart();
+  return notificationPrefixes(config).some((prefix) => text.startsWith(prefix));
+}
+
+function stripNotificationPrefix(content, config) {
+  let text = String(content || "").trimStart();
+  for (const prefix of notificationPrefixes(config)) {
+    if (text.startsWith(prefix)) {
+      text = text.slice(prefix.length).trimStart();
+      break;
+    }
+  }
+  return text;
+}
+
+function minutesBetween(start, end) {
+  return Math.max(0, Math.round(((end || Date.now()) - (start || Date.now())) / 60000));
+}
+
+function compactText(value, max = 1800) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function firstRecordIdFromCreate(output) {
+  const outputs = Array.isArray(output) ? output : [output];
+  for (const item of outputs) {
+    const ids = item?.data?.record_id_list || item?.record_id_list || [];
+    if (ids[0]) return ids[0];
+  }
+  return "";
+}
+
+function messageIdFromSend(output) {
+  const payload = output?.data || output || {};
+  return payload.message_id || payload.message?.message_id || payload.message?.id || payload.id || "";
+}
+
+function noticeId(chatId, sourceMessageIds) {
+  const first = sourceMessageIds[0] || "unknown";
+  const last = sourceMessageIds[sourceMessageIds.length - 1] || first;
+  return `${chatId}:${first}:${last}`.slice(0, 240);
+}
+
+function markdownList(items) {
+  return (items || [])
+    .filter(Boolean)
+    .slice(0, 6)
+    .map((item) => `- ${String(item).trim()}`)
+    .join("\n");
+}
+
+function labelValue(text, label) {
+  const match = String(text || "").match(new RegExp(`【${label}】\\s*([^\\n]+)`));
+  return match?.[1]?.trim() || "";
+}
+
+function eventMemberUsers(event) {
+  const payload = event?.event || event || {};
+  return (payload.users || []).map((user) => ({
+    id: user?.user_id?.open_id || user?.open_id || "",
+    name: user?.name || ""
+  })).filter((user) => user.id.startsWith("ou_"));
+}
+
+function hasExplicitTimezone(value) {
+  return /(?:Z|[+-]\d{2}:\d{2})$/i.test(String(value || "").trim());
+}
+
 export class StudioAgent {
   constructor(config, lark) {
     this.config = config;
@@ -83,8 +167,35 @@ export class StudioAgent {
     );
     this.processed = this.loadProcessedIds();
     this.autoEnrollInFlight = new Map();
+    this.activeNotifications = new Map();
+    this.notificationIdleTimers = new Map();
+    this.trackedNotifications = new Map();
+    this.recentMessagesById = new Map();
+    this.lastDiscussionByChat = new Map();
+    this.memberRosterByChat = new Map();
+    this.reminderStateFile = path.resolve(config.root, ".data/agent-reminder-state.json");
+    this.reminderState = this.loadReminderState();
     this.stream = null;
     this.timers = [];
+  }
+
+  loadReminderState() {
+    try {
+      const payload = JSON.parse(fs.readFileSync(this.reminderStateFile, "utf8"));
+      return {
+        notification: payload.notification || {},
+        profile: payload.profile || {}
+      };
+    } catch {
+      return { notification: {}, profile: {} };
+    }
+  }
+
+  saveReminderState() {
+    fs.mkdirSync(path.dirname(this.reminderStateFile), { recursive: true });
+    const temporaryPath = `${this.reminderStateFile}.tmp`;
+    fs.writeFileSync(temporaryPath, JSON.stringify(this.reminderState, null, 2), "utf8");
+    fs.renameSync(temporaryPath, this.reminderStateFile);
   }
 
   loadProcessedIds() {
@@ -133,7 +244,7 @@ export class StudioAgent {
   async refreshIdentityMappings() {
     const [memberOutput, membershipOutput] = await Promise.all([
       this.lark.listRecords(this.config.tables.members, [
-        "飞书成员", "姓名", "成长阶段", "成员状态", "年级"
+        "飞书成员", "姓名", "成长阶段", "成员状态", "年级", "兴趣方向", "技能标签", "加入日期"
       ]),
       this.lark.listRecords(this.config.tables.projectMemberships, [
         "所属项目", "成员", "项目角色", "成员类型", "关系状态", "加入日期", "退出日期"
@@ -151,7 +262,10 @@ export class StudioAgent {
         name: fields["姓名"] || "",
         stage: selectValue(fields["成长阶段"]),
         status: selectValue(fields["成员状态"]),
-        grade: selectValue(fields["年级"])
+        grade: selectValue(fields["年级"]),
+        interests: Array.isArray(fields["兴趣方向"]) ? fields["兴趣方向"] : [],
+        skills: String(fields["技能标签"] || ""),
+        joinedAt: fields["加入日期"] || ""
       });
     }
 
@@ -301,6 +415,209 @@ export class StudioAgent {
     console.log(`[agent] 机器人已加入群聊，自动启用分析：${payload.name || payload.chat_id}`);
   }
 
+  managedGroup(chatId) {
+    return (this.config.memberGovernance?.groups || []).find((group) => group.chatId === chatId) || null;
+  }
+
+  memberProfileIncomplete(member) {
+    return Boolean(member && (!member.grade || !member.interests?.length || !member.skills));
+  }
+
+  async sendProfileReminder(openId, name = "同学") {
+    const settings = this.config.memberGovernance || {};
+    if (!settings.memberProfileFormUrl) return false;
+    const repeatMs = Math.max(Number(settings.profileReminderRepeatDays) || 7, 1) * 24 * 60 * 60 * 1000;
+    const lastSent = Number(this.reminderState.profile[openId] || 0);
+    if (Date.now() - lastSent < repeatMs) return false;
+    this.lark.sendPrivateText(
+      openId,
+      `${name}你好，我是云机器人。为了让项目成员、贡献记录和后续协作能正确对应，请补全工作室成员档案：${settings.memberProfileFormUrl}\n\n这是资料补全提醒，不是考核通知；如信息已经完整，可以忽略。`,
+      `profile-${openId.slice(-16)}-${Math.floor(Date.now() / repeatMs)}`
+    );
+    this.reminderState.profile[openId] = Date.now();
+    this.saveReminderState();
+    return true;
+  }
+
+  createGovernanceAction({ title, projectName = "团队管理", chatId = "", sourceId = "", ownerId = "" }) {
+    const row = {
+      "行动项": title,
+      "所属项目": projectName,
+      "群聊ID": chatId,
+      "来源消息ID": sourceId,
+      "状态": "待确认",
+      "置信度": 1,
+      "生成时间": toFeishuDate(),
+      "Agent版本": this.config.agentVersion
+    };
+    if (ownerId) row["负责人"] = userCell(ownerId);
+    this.lark.createRecords(this.config.tables.actions, [row]);
+  }
+
+  async syncManagedGroup(group, { notifyNewMembers = false } = {}) {
+    if (!group || this.isExcludedChat(group.chatId)) return;
+    const users = this.lark.listChatMemberUsers(group.chatId);
+    this.memberRosterByChat.set(group.chatId, new Set(users.map((user) => user.id)));
+    const newMemberRows = [];
+    const newMembershipRows = [];
+    const pendingMemberIds = new Set();
+
+    for (const user of users) {
+      let member = this.memberDirectory.get(user.id);
+      if (!member && !pendingMemberIds.has(user.id)) {
+        newMemberRows.push({
+          "姓名": user.name || user.id,
+          "飞书成员": userCell(user.id),
+          "成员状态": "活跃",
+          "成长阶段": "观见习生",
+          "加入日期": toFeishuDate()
+        });
+        pendingMemberIds.add(user.id);
+      }
+
+      if (group.type === "project" && group.projectName) {
+        const key = membershipKey(group.projectName, user.id);
+        if (!this.projectMemberships.has(key)) {
+          newMembershipRows.push({
+            "关系名称": `${group.projectName}｜${user.name || user.id}`,
+            "所属项目": group.projectName,
+            "成员": userCell(user.id),
+            "项目角色": "其他",
+            "关系状态": "待确认",
+            "成员类型": "工作室成员",
+            "加入日期": toFeishuDate(),
+            "说明": `Agent 根据“${group.chatName}”群成员同步创建，项目角色和关系状态待负责人确认。`
+          });
+        }
+      }
+
+      member = member || (pendingMemberIds.has(user.id) ? { grade: "", interests: [], skills: "" } : null);
+      if (notifyNewMembers && this.memberProfileIncomplete(member)) {
+        try {
+          await this.sendProfileReminder(user.id, user.name || "同学");
+        } catch (error) {
+          console.error(`[agent] 成员档案提醒发送失败：${user.name || user.id}`, error.message);
+        }
+      }
+    }
+
+    this.lark.createRecords(this.config.tables.members, newMemberRows);
+    this.lark.createRecords(this.config.tables.projectMemberships, newMembershipRows);
+    if (newMemberRows.length || newMembershipRows.length) await this.refreshIdentityMappings();
+  }
+
+  async syncManagedGroups(options = {}) {
+    if (!this.config.memberGovernance?.enabled) return { groups: 0 };
+    const groups = (this.config.memberGovernance.groups || [])
+      .filter((group) => !options.chatIds?.length || options.chatIds.includes(group.chatId));
+    for (const group of groups) await this.syncManagedGroup(group, options);
+    console.log(`[agent] 群成员同步完成：${groups.length} 个纳管群`);
+    return { groups: groups.length };
+  }
+
+  async sendIncompleteProfileReminders() {
+    for (const member of this.memberDirectory.values()) {
+      if (member.status === "已退出" || member.grade === "指导教师" || !this.memberProfileIncomplete(member)) continue;
+      try {
+        await this.sendProfileReminder(member.openId, member.name || "同学");
+      } catch (error) {
+        console.error(`[agent] 成员档案定期提醒失败：${member.name || member.openId}`, error.message);
+      }
+    }
+  }
+
+  async handleUserMembershipChanged(event, action) {
+    const payload = event.event || event;
+    const group = this.managedGroup(payload.chat_id);
+    if (!group || this.isExcludedChat(payload.chat_id)) return;
+    const users = eventMemberUsers(event);
+
+    if (action === "added") {
+      await this.syncManagedGroup(group, { notifyNewMembers: true });
+      return;
+    }
+
+    for (const user of users) {
+      if (group.type === "project" && group.projectName) {
+        const membership = this.projectMemberships.get(membershipKey(group.projectName, user.id));
+        if (membership?.recordId && membership.status !== "已退出") {
+          this.lark.updateRecords(this.config.tables.projectMemberships, {
+            [membership.recordId]: {
+              "关系状态": "暂停",
+              "退出日期": toFeishuDate(),
+              "说明": `Agent 检测到该成员已离开“${group.chatName}”；是否退出项目仍需负责人确认。`
+            }
+          });
+        }
+      }
+      this.createGovernanceAction({
+        title: `确认${user.name || user.id}离开“${group.chatName}”后的成员或项目关系`,
+        projectName: group.projectName || "团队管理",
+        chatId: group.chatId,
+        sourceId: event.header?.event_id || "",
+        ownerId: this.config.notifications?.publisherOpenIds?.[0] || ""
+      });
+    }
+    await this.refreshIdentityMappings();
+  }
+
+  automationOperator(openId) {
+    return new Set(this.config.automationCommands?.operatorOpenIds || []).has(openId);
+  }
+
+  handleAutomationCommand(message, mapping) {
+    if (!this.config.automationCommands?.enabled || !this.automationOperator(message.sender_id)) return;
+    const content = String(message.content || "");
+    const mentionIds = (message.mentions || []).map((mention) => mention.id).filter((id) => id?.startsWith("ou_"));
+
+    if (content.includes("【确认建任务】") && this.config.automationCommands.task?.enabled) {
+      const summary = labelValue(content, "任务");
+      const due = labelValue(content, "截止");
+      const assignee = mentionIds[0] || labelValue(content, "负责人");
+      if (!summary || !due || !assignee.startsWith("ou_")) {
+        this.createGovernanceAction({
+          title: "建任务命令信息不完整：需要【任务】、【负责人】@成员、【截止】",
+          projectName: mapping.projectName,
+          chatId: message.chat_id,
+          sourceId: message.message_id,
+          ownerId: message.sender_id
+        });
+        return;
+      }
+      this.lark.createTask({
+        summary,
+        description: `由云机器人根据“${mapping.chatName}”中的明确确认命令创建。来源消息：${message.message_id}`,
+        assignee,
+        due,
+        tasklistId: this.config.automationCommands.task.tasklistId || "",
+        idempotencyKey: `task-${message.message_id}`
+      });
+    }
+
+    if (content.includes("【确认建日程】") && this.config.automationCommands.calendar?.enabled) {
+      const summary = labelValue(content, "标题");
+      const start = labelValue(content, "开始");
+      const end = labelValue(content, "结束");
+      if (!summary || !start || !end || !hasExplicitTimezone(start) || !hasExplicitTimezone(end)) {
+        this.createGovernanceAction({
+          title: "建日程命令信息不完整：需要【标题】、带时区的【开始】和【结束】",
+          projectName: mapping.projectName,
+          chatId: message.chat_id,
+          sourceId: message.message_id,
+          ownerId: message.sender_id
+        });
+        return;
+      }
+      this.lark.createCalendarEvent({
+        summary,
+        start,
+        end,
+        attendeeIds: mentionIds.length ? mentionIds : [message.sender_id],
+        description: `由云机器人根据“${mapping.chatName}”中的明确确认命令创建。来源消息：${message.message_id}`
+      });
+    }
+  }
+
   shouldAcceptMessage(message) {
     if (message.chat_type && message.chat_type !== "group") return false;
     const senderType = message.sender_type || message.sender?.sender_type || message.sender?.type;
@@ -315,6 +632,370 @@ export class StudioAgent {
   shouldAccept(event) {
     if (event.type !== "im.message.receive_v1") return false;
     return this.shouldAcceptMessage(event);
+  }
+
+  isNotificationPublisher(openId) {
+    return new Set(this.config.notifications?.publisherOpenIds || []).has(openId);
+  }
+
+  shouldTrackNotificationMessage(message) {
+    if (!this.config.notifications?.enabled) return false;
+    if (!this.isNotificationPublisher(message.sender_id)) return false;
+    return this.activeNotifications.has(message.chat_id)
+      || startsWithNotificationPrefix(message.content, this.config);
+  }
+
+  isTrackableStudent(openId) {
+    if (!openId || this.isNotificationPublisher(openId)) return false;
+    const member = this.memberDirectory.get(openId);
+    return Boolean(member && !["指导教师", "已退出"].includes(member.status) && member.grade !== "指导教师");
+  }
+
+  rememberMessage(message, mapping) {
+    this.recentMessagesById.set(message.message_id, {
+      messageId: message.message_id,
+      senderId: message.sender_id,
+      chatId: message.chat_id,
+      projectName: mapping.projectName,
+      content: message.content,
+      timeMs: messageTimeMs(message)
+    });
+    if (this.recentMessagesById.size > 5000) {
+      this.recentMessagesById.delete(this.recentMessagesById.keys().next().value);
+    }
+  }
+
+  handleOperationalTracking(message, mapping) {
+    this.rememberMessage(message, mapping);
+    try {
+      if (this.shouldTrackNotificationMessage(message)) {
+        this.trackNotificationMessage(message, mapping);
+        return;
+      }
+      this.trackDiscussionResponse(message, mapping);
+    } catch (error) {
+      console.error("[agent] 运营追踪失败", error.message);
+    }
+  }
+
+  trackNotificationMessage(message, mapping) {
+    const chatId = message.chat_id;
+    const active = this.activeNotifications.get(chatId) || {
+      mapping,
+      messages: [],
+      startedAtMs: messageTimeMs(message)
+    };
+    active.mapping = mapping;
+    active.messages.push(message);
+    active.endedAtMs = messageTimeMs(message);
+    this.activeNotifications.set(chatId, active);
+
+    const oldTimer = this.notificationIdleTimers.get(chatId);
+    if (oldTimer) clearTimeout(oldTimer);
+    const idleMs = Math.max(Number(this.config.notifications?.idleMinutes) || 5, 1) * 60 * 1000;
+    const timer = setTimeout(() => {
+      this.finalizeNotification(chatId).catch((error) => {
+        console.error("[agent] 通知摘要生成失败", error.message);
+      });
+    }, idleMs);
+    this.notificationIdleTimers.set(chatId, timer);
+  }
+
+  buildNotificationMarkdown(summary, active) {
+    const mapping = active.mapping;
+    const keyPoints = markdownList(summary.key_points);
+    const actions = markdownList(summary.action_items);
+    return [
+      `**通知摘要｜${summary.title || "请关注"}**`,
+      "",
+      `项目：${mapping.projectName}`,
+      summary.deadline ? `截止时间：${summary.deadline}` : "",
+      "",
+      summary.summary || "",
+      keyPoints ? `\n**重点**\n${keyPoints}` : "",
+      actions ? `\n**需要行动**\n${actions}` : "",
+      "",
+      "有问题请直接在群内讨论。"
+    ].filter(Boolean).join("\n");
+  }
+
+  async finalizeNotification(chatId) {
+    const active = this.activeNotifications.get(chatId);
+    if (!active || !active.messages.length) return;
+    this.activeNotifications.delete(chatId);
+    const timer = this.notificationIdleTimers.get(chatId);
+    if (timer) clearTimeout(timer);
+    this.notificationIdleTimers.delete(chatId);
+
+    const summary = await this.analyzer.summarizeNotification({
+      projectName: active.mapping.projectName,
+      chatName: active.mapping.chatName,
+      messages: active.messages.map((message) => ({
+        ...message,
+        content: stripNotificationPrefix(message.content, this.config)
+      }))
+    });
+    const sourceMessageIds = active.messages.map((message) => message.message_id);
+    const id = noticeId(chatId, sourceMessageIds);
+    const markdown = this.buildNotificationMarkdown(summary, active);
+    let summaryMessageId = "";
+    let sendError = "";
+    const sentAtMs = Date.now();
+
+    if (this.config.notifications?.sendSummaryToGroup) {
+      try {
+        const output = this.lark.sendMarkdown(chatId, markdown, `notice-${sourceMessageIds.at(-1) || Date.now()}`);
+        summaryMessageId = messageIdFromSend(output);
+      } catch (error) {
+        sendError = error.message.slice(0, 500);
+      }
+    }
+
+    const trackingDeadlineMs = sentAtMs + Math.min(
+      Math.max(Number(this.config.notifications?.readTracking?.trackingDays) || 7, 1),
+      7
+    ) * 24 * 60 * 60 * 1000;
+    const recordOutput = this.lark.createRecords(this.config.tables.notifications, [{
+      "通知ID": id,
+      "通知标题": summary.title || "未命名通知",
+      "通知摘要": summary.summary || compactText(active.messages.map((message) => message.content).join("\n")),
+      "群聊ID": chatId,
+      "群聊名称": active.mapping.chatName,
+      "所属项目": active.mapping.projectName,
+      "发布人": userCell(active.messages[0].sender_id),
+      "原始消息ID": compactIds(sourceMessageIds),
+      "原始消息数": active.messages.length,
+      "通知开始时间": toFeishuDate(active.startedAtMs),
+      "通知结束时间": toFeishuDate(active.endedAtMs),
+      "摘要消息ID": summaryMessageId,
+      "摘要发送时间": summaryMessageId ? toFeishuDate(sentAtMs) : null,
+      "阅读状态": summaryMessageId ? "跟踪中" : "发送失败",
+      "已读人数": 0,
+      "未读人数": 0,
+      "群成员数": 0,
+      "同步说明": sendError,
+      "跟踪截止时间": toFeishuDate(trackingDeadlineMs),
+      "Agent版本": this.config.agentVersion
+    }]);
+
+    const recordId = firstRecordIdFromCreate(recordOutput);
+    if (summaryMessageId && this.config.notifications?.readTracking?.enabled) {
+      const tracked = {
+        noticeId: id,
+        recordId,
+        chatId,
+        chatName: active.mapping.chatName,
+        projectName: active.mapping.projectName,
+        summaryMessageId,
+        sentAtMs,
+        deadlineMs: trackingDeadlineMs
+      };
+      this.trackedNotifications.set(id, tracked);
+      await this.syncNotificationReadStatus(tracked);
+    }
+  }
+
+  trackDiscussionResponse(message, mapping) {
+    if (!this.config.responseTracking?.enabled || !this.isTrackableStudent(message.sender_id)) return;
+
+    const current = {
+      messageId: message.message_id,
+      senderId: message.sender_id,
+      chatId: message.chat_id,
+      projectName: mapping.projectName,
+      content: message.content,
+      timeMs: messageTimeMs(message)
+    };
+
+    if (message.reply_to) {
+      const source = this.recentMessagesById.get(message.reply_to) || {
+        messageId: message.reply_to,
+        senderId: "",
+        chatId: message.chat_id,
+        projectName: mapping.projectName,
+        content: "",
+        timeMs: 0
+      };
+      this.createResponseMetric(source, current, "引用回复");
+    } else {
+      const previous = this.lastDiscussionByChat.get(message.chat_id);
+      if (previous && previous.senderId !== current.senderId) {
+        const gap = minutesBetween(previous.timeMs, current.timeMs);
+        const maxGap = Math.max(Number(this.config.responseTracking.maxSequentialGapMinutes) || 360, 1);
+        if (gap <= maxGap) this.createResponseMetric(previous, current, "顺序接话");
+      }
+    }
+
+    this.lastDiscussionByChat.set(message.chat_id, current);
+  }
+
+  createResponseMetric(source, response, responseType) {
+    const minutes = source.timeMs ? minutesBetween(source.timeMs, response.timeMs) : 0;
+    const slowMinutes = Math.max(Number(this.config.responseTracking?.slowReplyMinutes) || 120, 1);
+    const row = {
+      "响应ID": `${source.messageId || "unknown"}:${response.messageId}`.slice(0, 240),
+      "群聊ID": response.chatId,
+      "所属项目": response.projectName,
+      "被响应消息ID": source.messageId || "",
+      "被响应成员": userCell(source.senderId),
+      "被响应时间": source.timeMs ? toFeishuDate(source.timeMs) : null,
+      "回复消息ID": response.messageId,
+      "回复成员": userCell(response.senderId),
+      "回复时间": toFeishuDate(response.timeMs),
+      "响应耗时分钟": minutes,
+      "响应类型": responseType,
+      "是否超时": Boolean(minutes && minutes >= slowMinutes),
+      "Agent版本": this.config.agentVersion
+    };
+    if (!row["被响应成员"]) delete row["被响应成员"];
+    this.lark.createRecords(this.config.tables.responseMetrics, [row]);
+  }
+
+  async loadTrackedNotifications() {
+    if (!this.config.notifications?.readTracking?.enabled) return;
+    try {
+      const output = this.lark.listRecords(this.config.tables.notifications, [
+        "通知ID", "群聊ID", "群聊名称", "所属项目", "摘要消息ID", "摘要发送时间", "阅读状态", "跟踪截止时间"
+      ]);
+      for (const record of recordsFrom(output)) {
+        const fields = fieldsFrom(record);
+        if (selectValue(fields["阅读状态"]) !== "跟踪中" || !fields["摘要消息ID"]) continue;
+        const deadlineMs = messageTimeMs({ create_time: fields["跟踪截止时间"] || Date.now() });
+        if (deadlineMs <= Date.now()) continue;
+        this.trackedNotifications.set(fields["通知ID"], {
+          noticeId: fields["通知ID"],
+          recordId: recordIdFrom(record),
+          chatId: fields["群聊ID"],
+          chatName: fields["群聊名称"] || fields["群聊ID"],
+          projectName: fields["所属项目"] || "",
+          summaryMessageId: fields["摘要消息ID"],
+          sentAtMs: messageTimeMs({ create_time: fields["摘要发送时间"] || Date.now() }),
+          deadlineMs
+        });
+      }
+      console.log(`[agent] 已加载 ${this.trackedNotifications.size} 条通知阅读追踪`);
+    } catch (error) {
+      console.error("[agent] 加载通知阅读追踪失败", error.message);
+    }
+  }
+
+  async syncAllNotificationReads() {
+    for (const notice of [...this.trackedNotifications.values()]) {
+      await this.syncNotificationReadStatus(notice);
+    }
+  }
+
+  async syncNotificationReadStatus(notice) {
+    if (!notice.summaryMessageId) return;
+    const now = Date.now();
+    const expired = now >= notice.deadlineMs;
+    let syncNote = "";
+    let chatMembers = [];
+
+    try {
+      chatMembers = this.lark.listChatMemberUsers(notice.chatId);
+    } catch (error) {
+      syncNote = `群成员列表读取失败：${error.message.slice(0, 160)}`;
+    }
+
+    const readUsers = this.lark.readMessageUsers(notice.summaryMessageId);
+    const readAtById = new Map(readUsers.map((item) => [item.id, item.readAt]));
+    const memberIds = chatMembers.map((member) => member.id);
+    const readIds = memberIds.length
+      ? memberIds.filter((id) => readAtById.has(id))
+      : readUsers.map((item) => item.id);
+    const unreadIds = memberIds.length ? memberIds.filter((id) => !readAtById.has(id)) : [];
+    const allRead = memberIds.length > 0 && unreadIds.length === 0;
+    const status = allRead ? "全部已读" : expired ? "已过期" : "跟踪中";
+    const lastSync = toFeishuDate(now);
+
+    if (notice.recordId) {
+      this.lark.updateRecords(this.config.tables.notifications, {
+        [notice.recordId]: {
+          "阅读状态": status,
+          "已读人数": readIds.length,
+          "未读人数": unreadIds.length,
+          "群成员数": memberIds.length,
+          "已读成员ID": compactIds(readIds),
+          "未读成员ID": compactIds(unreadIds),
+          "最后同步时间": lastSync,
+          "同步说明": syncNote
+        }
+      });
+    }
+
+    this.upsertNotificationReadDetails(notice, chatMembers, readAtById, lastSync);
+    await this.remindUnreadNotificationMembers(notice, unreadIds, now);
+    if (allRead || expired) this.trackedNotifications.delete(notice.noticeId);
+  }
+
+  async remindUnreadNotificationMembers(notice, unreadIds, now) {
+    const settings = this.config.notifications?.readTracking || {};
+    if (!settings.sendPrivateReminder || !unreadIds.length) return;
+    const thresholdMs = Math.max(Number(settings.reminderAfterHours) || 8, 1) * 60 * 60 * 1000;
+    if (now - notice.sentAtMs < thresholdMs) return;
+
+    for (const openId of unreadIds) {
+      if (!this.isTrackableStudent(openId)) continue;
+      const key = `${notice.noticeId}:${openId}`;
+      if (settings.remindOnlyOnce !== false && this.reminderState.notification[key]) continue;
+      const member = this.memberDirectory.get(openId);
+      try {
+        this.lark.sendPrivateText(
+          openId,
+          `${member?.name || "同学"}你好，“${notice.chatName}”中有一条通知摘要发布超过 8 小时仍未显示已读。请在方便时查看群内由云机器人发送的通知摘要；这是一条一次性提醒，无需单独回复。`,
+          `unread-${notice.summaryMessageId.slice(-18)}-${openId.slice(-12)}`
+        );
+        this.reminderState.notification[key] = Date.now();
+        this.saveReminderState();
+      } catch (error) {
+        console.error(`[agent] 通知未读私聊提醒失败：${member?.name || openId}`, error.message);
+      }
+    }
+  }
+
+  upsertNotificationReadDetails(notice, chatMembers, readAtById, lastSync) {
+    if (!chatMembers.length) return;
+    const output = this.lark.listRecords(this.config.tables.notificationReads, [
+      "阅读记录ID", "阅读状态", "首次已读时间"
+    ]);
+    const existing = new Map(recordsFrom(output).map((record) => {
+      const fields = fieldsFrom(record);
+      return [fields["阅读记录ID"], { recordId: recordIdFrom(record), fields }];
+    }));
+    const creates = [];
+    const updates = {};
+
+    for (const member of chatMembers) {
+      const id = `${notice.noticeId}:${member.id}`.slice(0, 240);
+      const readAt = readAtById.get(member.id);
+      const baseFields = {
+        "通知ID": notice.noticeId,
+        "摘要消息ID": notice.summaryMessageId,
+        "群聊ID": notice.chatId,
+        "所属项目": notice.projectName,
+        "成员": userCell(member.id),
+        "成员OpenID": member.id,
+        "阅读状态": readAt ? "已读" : "未读",
+        "最后同步时间": lastSync,
+        "Agent版本": this.config.agentVersion
+      };
+      if (readAt) baseFields["首次已读时间"] = toFeishuDate(readAt);
+
+      const current = existing.get(id);
+      if (!current) {
+        creates.push({ "阅读记录ID": id, ...baseFields });
+      } else {
+        const firstReadAt = current.fields["首次已读时间"];
+        updates[current.recordId] = {
+          ...baseFields,
+          "首次已读时间": firstReadAt || baseFields["首次已读时间"] || null
+        };
+      }
+    }
+
+    this.lark.createRecords(this.config.tables.notificationReads, creates);
+    this.lark.updateRecords(this.config.tables.notificationReads, updates);
   }
 
   accept(event) {
@@ -337,6 +1018,12 @@ export class StudioAgent {
       projectName: "待归属项目",
       allowDocumentDrafts: false
     };
+    try {
+      this.handleAutomationCommand(event, mapping);
+    } catch (error) {
+      console.error("[agent] 飞书任务/日程命令执行失败", error.message);
+    }
+    this.handleOperationalTracking(event, mapping);
     const batch = this.batches.get(event.chat_id) || {
       mapping,
       messages: [],
@@ -650,6 +1337,8 @@ export class StudioAgent {
 
   async start() {
     await this.refreshRuntimeMappings();
+    await this.loadTrackedNotifications();
+    await this.syncManagedGroups({ notifyNewMembers: false });
     this.timers.push(setInterval(
       () => this.refreshRuntimeMappings().catch((error) => console.error("[agent] 刷新运行配置失败", error)),
       this.config.batch.configRefreshSeconds * 1000
@@ -658,20 +1347,33 @@ export class StudioAgent {
       () => this.flushDueBatches().catch((error) => console.error("[agent] 定时分析失败", error)),
       this.config.batch.flushIntervalSeconds * 1000
     ));
+    this.timers.push(setInterval(
+      () => this.syncAllNotificationReads().catch((error) => console.error("[agent] 通知阅读同步失败", error)),
+      Math.max(Number(this.config.notifications?.readTracking?.syncIntervalMinutes) || 10, 1) * 60 * 1000
+    ));
+    this.timers.push(setInterval(
+      () => this.syncManagedGroups({ notifyNewMembers: false }).catch((error) => console.error("[agent] 群成员同步失败", error)),
+      Math.max(Number(this.config.memberGovernance?.syncIntervalMinutes) || 30, 1) * 60 * 1000
+    ));
+    this.timers.push(setInterval(
+      () => this.sendIncompleteProfileReminders().catch((error) => console.error("[agent] 成员档案提醒失败", error)),
+      Math.max(Number(this.config.memberGovernance?.profileReminderIntervalHours) || 24, 1) * 60 * 60 * 1000
+    ));
     const messageStream = await this.lark.startMessageStream((event) => this.accept(event));
-    let membershipStream = null;
+    let membershipStreams = null;
     try {
-      membershipStream = await this.lark.startEventStream(
-        "im.chat.member.bot.added_v1",
-        (event) => this.handleBotAdded(event)
-      );
+      membershipStreams = await this.lark.startEventStreams([
+        { eventKey: "im.chat.member.bot.added_v1", onEvent: (event) => this.handleBotAdded(event) },
+        { eventKey: "im.chat.member.user.added_v1", onEvent: (event) => this.handleUserMembershipChanged(event, "added") },
+        { eventKey: "im.chat.member.user.deleted_v1", onEvent: (event) => this.handleUserMembershipChanged(event, "deleted") }
+      ]);
     } catch (error) {
-      console.error("[agent] 入群事件监听未启用，将由首条群消息触发自动接入", error.message);
+      console.error("[agent] 群成员事件监听未完全启用，将由定时同步兜底", error.message);
     }
     this.stream = {
       stop: () => {
         messageStream.stop();
-        membershipStream?.stop();
+        membershipStreams?.stop();
       }
     };
     await this.backfillRecentHistory();
@@ -680,6 +1382,8 @@ export class StudioAgent {
 
   async stop() {
     for (const timer of this.timers) clearInterval(timer);
+    for (const timer of this.notificationIdleTimers.values()) clearTimeout(timer);
+    this.notificationIdleTimers.clear();
     for (const chatId of [...this.batches.keys()]) {
       try {
         await this.flushChat(chatId);

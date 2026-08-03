@@ -10,6 +10,7 @@
     "doctor": "node src/index.js doctor",
     "backfill": "node src/index.js backfill",
     "sync-identities": "node src/index.js sync-identities",
+    "sync-members": "node src/index.js sync-members",
     "bootstrap": "node scripts/bootstrap-agent-base.js"
   },
   "engines": {
