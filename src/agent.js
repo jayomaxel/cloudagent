@@ -103,6 +103,27 @@ function minutesBetween(start, end) {
   return Math.max(0, Math.round(((end || Date.now()) - (start || Date.now())) / 60000));
 }
 
+function conversationIdleMs(config) {
+  return Math.max(Number(config.batch?.idleSeconds) || 1800, 1) * 1000;
+}
+
+function splitConversationRounds(messages, idleMs) {
+  const rounds = [];
+  let current = [];
+  let lastTime = 0;
+  for (const message of messages) {
+    const time = messageTimeMs(message);
+    if (current.length && time - lastTime > idleMs) {
+      rounds.push(current);
+      current = [];
+    }
+    current.push(message);
+    lastTime = time;
+  }
+  if (current.length) rounds.push(current);
+  return rounds;
+}
+
 function compactText(value, max = 1800) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
 }
@@ -133,6 +154,21 @@ function markdownList(items) {
     .slice(0, 6)
     .map((item) => `- ${String(item).trim()}`)
     .join("\n");
+}
+
+function listText(items, max = 8) {
+  return (items || [])
+    .filter(Boolean)
+    .slice(0, max)
+    .map((item) => `- ${String(item).trim()}`)
+    .join("\n");
+}
+
+function topicSnapshotId(chatId, sourceMessageIds, title) {
+  const ids = sourceMessageIds || [];
+  const first = ids[0] || "unknown";
+  const last = ids[ids.length - 1] || first;
+  return `${chatId}:${first}:${last}:${title || "topic"}`.slice(0, 240);
 }
 
 function labelValue(text, label) {
@@ -1027,19 +1063,19 @@ export class StudioAgent {
     const batch = this.batches.get(event.chat_id) || {
       mapping,
       messages: [],
-      firstSeenAt: Date.now()
+      firstSeenAt: Date.now(),
+      lastSeenAt: Date.now()
     };
+    batch.mapping = mapping;
     batch.messages.push(event);
+    batch.lastSeenAt = Date.now();
     this.batches.set(event.chat_id, batch);
-    if (batch.messages.length >= this.config.batch.maxMessages) {
-      this.flushChat(event.chat_id).catch((error) => console.error("[agent] 批次分析失败", error));
-    }
   }
 
   async flushDueBatches() {
-    const deadline = this.config.batch.windowSeconds * 1000;
+    const idleMs = conversationIdleMs(this.config);
     for (const [chatId, batch] of this.batches) {
-      if (Date.now() - batch.firstSeenAt >= deadline) await this.flushChat(chatId);
+      if (Date.now() - (batch.lastSeenAt || batch.firstSeenAt) >= idleMs) await this.flushChat(chatId);
     }
   }
 
@@ -1151,6 +1187,47 @@ export class StudioAgent {
     );
     this.lark.createRecords(this.config.tables.decisions, newDecisionRows);
 
+    const topicSettings = this.config.topicSnapshots || {};
+    const maxTopicSnapshots = Math.max(Number(topicSettings.maxPerBatch) || 3, 0);
+    const minTopicMessages = Math.max(Number(topicSettings.minMessageCount) || 2, 1);
+    const topicRows = topicSettings.enabled !== false && this.config.tables.topicSnapshots
+      ? (analysis.topic_snapshots || [])
+        .filter((item) => (item.source_message_ids || []).length >= minTopicMessages)
+        .slice(0, maxTopicSnapshots)
+        .map((item) => ({
+          "快照ID": topicSnapshotId(batch.mapping.chatId, item.source_message_ids, item.title),
+          "快照标题": item.title,
+          "话题类型": item.topic_type,
+          "一句话总结": item.one_sentence_summary,
+          "群聊ID": batch.mapping.chatId,
+          "群聊名称": batch.mapping.chatName,
+          "所属项目": batch.mapping.projectName,
+          "明确进展": listText(item.progress_points),
+          "当前卡点": listText(item.blockers),
+          "待办事项": listText(item.action_items),
+          "待确认问题": listText(item.pending_questions),
+          "后续建议": listText(item.suggestions),
+          "相关成员ID": compactIds(item.related_open_ids),
+          "来源消息ID": compactIds(item.source_message_ids),
+          "消息数量": item.source_message_ids.length,
+          "讨论开始时间": toFeishuDate(batch.messages[0].create_time),
+          "讨论结束时间": toFeishuDate(batch.messages.at(-1).create_time),
+          "置信度": item.confidence,
+          "是否需要人工审核": Boolean(item.needs_human_review),
+          "处理状态": "待确认",
+          "生成时间": generatedAt,
+          "Agent版本": this.config.agentVersion
+        }))
+      : [];
+    const newTopicRows = topicRows.length
+      ? this.filterNewRows(
+        topicRows,
+        this.existingRecordKeys(this.config.tables.topicSnapshots, "快照ID"),
+        "快照ID"
+      )
+      : [];
+    this.lark.createRecords(this.config.tables.topicSnapshots, newTopicRows);
+
     const draftRows = [];
     const existingDraftKeys = this.existingRecordKeys(this.config.tables.drafts, "来源消息ID");
     for (const draft of analysis.document_drafts) {
@@ -1185,7 +1262,7 @@ export class StudioAgent {
     this.lark.createRecords(this.config.tables.drafts, draftRows);
     for (const message of batch.messages) this.processed.add(message.message_id);
     this.saveProcessedIds();
-    console.log(`[agent] ${source}｜${batch.mapping.projectName}：处理 ${batch.messages.length} 条消息，生成 ${evidenceRows.length} 条贡献证据、${actionRows.length} 个行动项、${draftRows.length} 份草稿`);
+    console.log(`[agent] ${source}｜${batch.mapping.projectName}：处理 ${batch.messages.length} 条消息，生成 ${topicRows.length} 条话题快照、${evidenceRows.length} 条贡献证据、${actionRows.length} 个行动项、${draftRows.length} 份草稿`);
   }
 
   normalizeHistoryMessage(message, chatId) {
@@ -1230,7 +1307,7 @@ export class StudioAgent {
       allowed.has(mapping.chatId) && !this.isExcludedChat(mapping.chatId) && requested.has(mapping.chatId)
     ));
     const results = [];
-    const chunkSize = Math.max(Number(this.config.batch.maxMessages) || 25, 1);
+    const idleMs = conversationIdleMs(this.config);
 
     for (const mapping of mappings) {
       const history = this.lark.listChatMessages(mapping.chatId, {
@@ -1242,11 +1319,17 @@ export class StudioAgent {
       });
       const accepted = history.messages
         .map((message) => this.normalizeHistoryMessage(message, mapping.chatId))
-        .filter((message) => this.shouldAcceptMessage(message));
+        .filter((message) => this.shouldAcceptMessage(message))
+        .sort((a, b) => messageTimeMs(a) - messageTimeMs(b));
 
-      for (let index = 0; index < accepted.length; index += chunkSize) {
-        const messages = accepted.slice(index, index + chunkSize);
-        await this.flushBatch({ mapping, messages, firstSeenAt: Date.now() }, "历史补读");
+      const rounds = splitConversationRounds(accepted, idleMs);
+      for (const messages of rounds) {
+        await this.flushBatch({
+          mapping,
+          messages,
+          firstSeenAt: messageTimeMs(messages[0]),
+          lastSeenAt: messageTimeMs(messages[messages.length - 1])
+        }, "历史补读");
       }
 
       results.push({
@@ -1255,6 +1338,7 @@ export class StudioAgent {
         project: mapping.projectName,
         fetched: history.messages.length,
         analyzed: accepted.length,
+        rounds: rounds.length,
         pages: history.pages,
         truncated: history.truncated
       });

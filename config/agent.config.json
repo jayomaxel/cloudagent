@@ -11,11 +11,12 @@
     "drafts": "Agent 文档审核",
     "notifications": "Agent 通知追踪",
     "notificationReads": "Agent 通知阅读明细",
-    "responseMetrics": "Agent 讨论响应监控"
+    "responseMetrics": "Agent 讨论响应监控",
+    "topicSnapshots": "Agent 群聊话题快照"
   },
   "batch": {
-    "maxMessages": 25,
-    "windowSeconds": 600,
+    "maxMessages": 500,
+    "idleSeconds": 1800,
     "flushIntervalSeconds": 30,
     "configRefreshSeconds": 60
   },
@@ -84,6 +85,11 @@
     "maxSequentialGapMinutes": 360,
     "slowReplyMinutes": 120
   },
+  "topicSnapshots": {
+    "enabled": true,
+    "maxPerBatch": 3,
+    "minMessageCount": 2
+  },
   "memberGovernance": {
     "enabled": true,
     "syncIntervalMinutes": 30,
@@ -130,5 +136,5 @@
       "defaultDurationMinutes": 30
     }
   },
-  "agentVersion": "0.3.0"
+  "agentVersion": "0.3.2"
 }
