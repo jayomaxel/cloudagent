@@ -1,23 +1,37 @@
 {
-  "name": "cloudagent",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "description": "AI Coding Studio 飞书项目管理 Agent",
-  "license": "MIT",
-  "scripts": {
-    "agent": "node src/index.js listen",
-    "doctor": "node src/index.js doctor",
-    "backfill": "node src/index.js backfill",
-    "sync-identities": "node src/index.js sync-identities",
-    "sync-members": "node src/index.js sync-members",
-    "bootstrap": "node scripts/bootstrap-agent-base.js"
-  },
-  "engines": {
-    "node": ">=20"
-  },
-  "dependencies": {
-    "openai": "latest",
-    "zod": "latest"
-  }
+    "name":  "cloudagent",
+    "version":  "0.7.1",
+    "private":  true,
+    "type":  "module",
+    "description":  "AI Coding Studio 飞书项目管理 Agent",
+    "license":  "MIT",
+    "scripts":  {
+                    "agent":  "node src/index.js listen",
+                    "agent:supervised":  "node scripts/run-supervised.js",
+                    "doctor":  "node src/index.js doctor",
+                    "backfill":  "node src/index.js backfill",
+                    "sync-identities":  "node src/index.js sync-identities",
+                    "sync-members":  "node src/index.js sync-members",
+                    "bootstrap":  "node scripts/bootstrap-agent-base.js",
+                    "test":  "node --test test/*.test.js",
+                    "migrate-agent":  "node scripts/migrate-agent-v0.5.js",
+                    "shadow-audit":  "node scripts/shadow-audit.js",
+                    "route-review-digest":  "node scripts/send-route-review-digest.js",
+                    "shadow-backfill":  "node scripts/shadow-backfill.js",
+                    "backfill-conclusions":  "node scripts/backfill-conclusion-ledger.js",
+                    "migrate-agent-v0.7":  "node scripts/migrate-agent-v0.7.js",
+                    "migrate-agent-v0.8":  "node scripts/migrate-agent-v0.8.js",
+                    "migrate-agent-v0.9":  "node scripts/migrate-agent-v0.9.js",
+                    "backfill:weekly":  "node scripts/backfill-weekly-reviews.js",
+                    "check:weekly-reports":  "node scripts/check-weekly-report-status.js",
+                    "reconcile:weekly-periods":  "node scripts/reconcile-weekly-periods.js",
+                    "rollback:write":  "node scripts/rollback-auto-write.js"
+                },
+    "engines":  {
+                    "node":  "\u003e=20"
+                },
+    "dependencies":  {
+                         "openai":  "7.3.0",
+                         "zod":  "4.4.3"
+                     }
 }

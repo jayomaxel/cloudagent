@@ -91,7 +91,12 @@ async function main() {
   if (command !== "listen") throw new Error(`未知命令：${command}`);
 
   const agent = new StudioAgent(config, lark);
-  await agent.start();
+  try {
+    await agent.start();
+  } catch (error) {
+    agent.abortStartup();
+    throw error;
+  }
   let stopping = false;
   const stop = async () => {
     if (stopping) return;

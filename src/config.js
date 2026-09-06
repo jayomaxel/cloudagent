@@ -37,15 +37,15 @@ export function loadConfig() {
   config.aiBaseUrl = config.provider === "deepseek"
     ? process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com"
     : undefined;
-  config.larkCliEntry = process.env.LARK_CLI_ENTRY || path.join(
-    process.env.APPDATA || "",
-    "npm",
-    "node_modules",
-    "@larksuite",
-    "cli",
-    "scripts",
-    "run.js"
-  );
+  config.reviewModel = process.env.AI_REVIEW_MODEL || config.model;
+  config.highRiskReviewModel = process.env.AI_HIGH_RISK_MODEL || config.reviewModel;
+  const larkPackageRoot = path.join(process.env.APPDATA || "", "npm", "node_modules", "@larksuite", "cli");
+  const larkCandidates = [
+    process.env.LARK_CLI_ENTRY,
+    path.join(larkPackageRoot, "bin", "lark-cli.exe"),
+    path.join(larkPackageRoot, "scripts", "run.js")
+  ].filter(Boolean);
+  config.larkCliEntry = larkCandidates.find((candidate) => fs.existsSync(candidate)) || larkCandidates[0];
 
   if (!config.baseToken) throw new Error("agent.config.json 缺少 baseToken");
   if (!new Set(["deepseek", "openai"]).has(config.provider)) {

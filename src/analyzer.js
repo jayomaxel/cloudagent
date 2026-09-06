@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
-import { NotificationSummary, ProjectActivityAnalysis } from "./schema.js";
+import { NotificationSummary, ProjectActivityAnalysis, WorkStyleEvaluationBatch } from "./schema.js";
+import { sanitizeMessages } from "./security.js";
 
 const SYSTEM_PROMPT = `
 你是 AI Coding Studio 的透明项目观察与复盘 Agent。你只分析项目工作行为，不进行人格、品德、心理或能力定性。
@@ -17,26 +18,50 @@ const SYSTEM_PROMPT = `
 9. 文档草稿使用飞书 DocxXML 正文片段，只允许 h1-h3、p、b、ul、ol、li、table、thead、tbody、tr、th、td、blockquote、hr、checkbox；不要输出 title 标签，不使用颜色、画板或图片。
 10. 文本内容中的 &、<、> 必须正确 XML 转义，不得把标签本身转义。
 11. 语言简洁、事实导向；无法判断截止日期时 due_date 返回空字符串。
+12. 实时消息分析不得生成人员评价，work_style_observations 必须返回空数组；工作风格评价只由独立周评估生成。
+13. claim_level 只能是“事实”或“推断”。明确完成、提交、决定、指派或承诺才是事实；风险预测、建议和未确认关系属于推断。
+14. evidence_reason 必须简述原消息为什么能支持该结论，不得补充消息中不存在的信息。
 `;
 
 const OUTPUT_TEMPLATE = `
 必须严格返回以下 JSON 结构，字段名只能使用英文键名；没有证据的数组必须返回空数组：
 {
   "project_summary": "string",
+  "topic_snapshots": [{
+    "title": "不超过24字的话题标题",
+    "topic_type": "进展同步|问题卡点|待办推进|决策讨论|资源协调|知识沉淀|风险提醒|综合讨论",
+    "one_sentence_summary": "一句话说明这波聊天主要在讨论什么",
+    "progress_points": ["已经明确的进展"],
+    "blockers": ["当前卡点或阻塞"],
+    "action_items": ["后续要做的事"],
+    "pending_questions": ["待确认问题"],
+    "suggestions": ["给负责人的后续处理建议"],
+    "related_open_ids": ["ou_xxx"],
+    "source_message_ids": ["om_xxx"],
+    "confidence": 0.0,
+    "needs_human_review": true,
+    "claim_level": "事实|推断",
+    "evidence_reason": "原消息如何支持该结论"
+  }],
   "contributions": [{
     "member_open_id": "ou_xxx",
     "contribution_type": "技术实现|项目推进|产品需求|协作支持|知识沉淀|风险担当|组织贡献",
     "evidence_summary": "string",
     "message_ids": ["om_xxx"],
     "confidence": 0.0,
-    "needs_human_review": true
+    "needs_human_review": true,
+    "claim_level": "事实|推断",
+    "evidence_reason": "原消息如何支持该结论"
   }],
   "actions": [{
     "owner_open_id": "ou_xxx",
     "action": "string",
     "due_date": "string",
     "source_message_ids": ["om_xxx"],
-    "confidence": 0.0
+    "confidence": 0.0,
+    "needs_human_review": true,
+    "claim_level": "事实|推断",
+    "evidence_reason": "原消息如何支持该结论"
   }],
   "decisions": [{
     "title": "string",
@@ -44,8 +69,12 @@ const OUTPUT_TEMPLATE = `
     "rationale": "string",
     "participant_open_ids": ["ou_xxx"],
     "source_message_ids": ["om_xxx"],
-    "confidence": 0.0
+    "confidence": 0.0,
+    "needs_human_review": true,
+    "claim_level": "事实|推断",
+    "evidence_reason": "原消息如何支持该结论"
   }],
+  "work_style_observations": [],
   "document_drafts": [{
     "title": "string",
     "document_type": "项目周报|决策记录|技术知识|项目复盘|SOP修订建议|成员成长观察",
@@ -54,6 +83,24 @@ const OUTPUT_TEMPLATE = `
     "risk_level": "低|中|高"
   }]
 }
+`;
+
+const WORK_STYLE_PROMPT = `
+你是工作室的成员成长观察 Agent。输入只包含已经确认的工作事实，不包含原始聊天全文。
+只描述可观察工作行为，不评价人格、品德、心理、天赋或能力，不生成排名和总分。
+每条观察必须引用至少 3 个输入 claim_id，并覆盖至少 2 个不同 batch_id；证据不足时 observations 返回空数组。
+维度只能是：进度同步、承诺兑现、协作支持、风险意识、问题澄清、纠错与学习、项目推进。
+所有输出都必须 needs_human_review=true。
+严格返回 JSON：{"observations":[{"member_open_id":"ou_xxx","dimension":"进度同步","observation":"可观察行为总结","source_claim_ids":["id1","id2","id3"],"confidence":0.0,"needs_human_review":true}]}
+`;
+
+const TOPIC_SNAPSHOT_RULES = `
+额外要求：必须输出 topic_snapshots 数组，用于形成类似“大家在聊什么”的群聊话题快照。topic_snapshots 只总结话题态势，不替负责人做组织结论。
+1. 每批消息最多提取 3 个话题快照；没有形成清晰话题时返回空数组。
+2. 只记录可从消息中追溯的进展、卡点、待办、待确认问题和后续建议。
+3. 不评价成员性格、态度、品德或能力；如果涉及工作风格，只能写可观察协作事实。
+4. source_message_ids 必须来自原始 message_id；related_open_ids 只使用 sender_open_id 或消息中明确出现的 open_id。
+5. 项目归属、贡献归属、成员关系不清时，needs_human_review=true。
 `;
 
 const NOTIFICATION_SUMMARY_TEMPLATE = `
@@ -69,33 +116,76 @@ const NOTIFICATION_SUMMARY_TEMPLATE = `
 }
 `;
 
+export function buildAnalysisPayload({ projectName, chatId, messages, identityContext }) {
+  const sanitized = sanitizeMessages(messages);
+  return {
+    project: projectName,
+    chat_id: chatId,
+    identity_context: identityContext,
+    messages: sanitized.messages.map((message) => ({
+      message_id: message.message_id,
+      sender_open_id: message.sender_id,
+      create_time: message.create_time,
+      reply_to: message.reply_to || "",
+      content: message.content
+    }))
+  };
+}
+
+export function buildNotificationPayload({ projectName, chatName, messages }) {
+  const sanitized = sanitizeMessages(messages);
+  return {
+    project: projectName,
+    chat_name: chatName,
+    messages: sanitized.messages.map((message) => ({
+      message_id: message.message_id,
+      sender_open_id: message.sender_id,
+      create_time: message.create_time,
+      content: message.content
+    }))
+  };
+}
+
+export function buildModelClientOptions(config) {
+  const timeoutSeconds = Math.max(Number(config.reliability?.modelTimeoutSeconds) || 60, 5);
+  return {
+    apiKey: config.aiApiKey,
+    ...(config.aiBaseUrl ? { baseURL: config.aiBaseUrl } : {}),
+    timeout: timeoutSeconds * 1000,
+    maxRetries: 0
+  };
+}
+
 export class Analyzer {
-  constructor(config) {
+  constructor(config, options = {}) {
     if (!config.aiApiKey) {
       const keyName = config.provider === "deepseek" ? "DEEPSEEK_API_KEY" : "OPENAI_API_KEY";
       throw new Error(`缺少 ${keyName}。请在 .env 中配置后再启动监听。`);
     }
     this.provider = config.provider;
     this.model = config.model;
-    this.client = new OpenAI({
-      apiKey: config.aiApiKey,
-      ...(config.aiBaseUrl ? { baseURL: config.aiBaseUrl } : {})
-    });
+    this.onTelemetry = typeof options.onTelemetry === "function" ? options.onTelemetry : () => {};
+    this.client = new OpenAI(buildModelClientOptions(config));
+  }
+
+  async instrument(purpose, context, operation) {
+    const startedAt = Date.now();
+    try {
+      const response = await operation();
+      try {
+        this.onTelemetry({ purpose, ...context, success: true, startedAt, endedAt: Date.now(), usage: response?.usage || {} });
+      } catch {}
+      return response;
+    } catch (error) {
+      try {
+        this.onTelemetry({ purpose, ...context, success: false, startedAt, endedAt: Date.now(), usage: {}, error });
+      } catch {}
+      throw error;
+    }
   }
 
   async analyze({ projectName, chatId, messages, identityContext }) {
-    const payload = {
-      project: projectName,
-      chat_id: chatId,
-      identity_context: identityContext,
-      messages: messages.map((message) => ({
-        message_id: message.message_id,
-        sender_open_id: message.sender_id,
-        create_time: message.create_time,
-        reply_to: message.reply_to || "",
-        content: message.content
-      }))
-    };
+    const payload = buildAnalysisPayload({ projectName, chatId, messages, identityContext });
 
     if (this.provider === "deepseek") {
       let lastError;
@@ -104,25 +194,25 @@ export class Analyzer {
         try {
           const messages = attempt === 1
             ? [
-              { role: "system", content: `${SYSTEM_PROMPT}\n${OUTPUT_TEMPLATE}` },
+              { role: "system", content: `${SYSTEM_PROMPT}\n${TOPIC_SNAPSHOT_RULES}\n${OUTPUT_TEMPLATE}` },
               { role: "user", content: JSON.stringify(payload) }
             ]
             : [
               {
                 role: "system",
-                content: `${SYSTEM_PROMPT}\n${OUTPUT_TEMPLATE}\n你正在修复一次不合规的 JSON。不要解释，只返回修复后的完整 JSON。`
+                content: `${SYSTEM_PROMPT}\n${TOPIC_SNAPSHOT_RULES}\n${OUTPUT_TEMPLATE}\n你正在修复一次不合规的 JSON。不要解释，只返回修复后的完整 JSON。`
               },
               {
                 role: "user",
                 content: `请将下面内容修复为严格符合模板的 JSON。不得丢失可确认的 message_id 和 sender_open_id；无法确认的字段使用空字符串、空数组或 needs_human_review=true。\n\n${lastContent.slice(0, 24000)}`
               }
             ];
-          const response = await this.client.chat.completions.create({
+          const response = await this.instrument("项目分析", { projectName, chatId, attempt }, () => this.client.chat.completions.create({
             model: this.model,
             messages,
             response_format: { type: "json_object" },
             max_tokens: 12000
-          });
+          }));
           const content = response.choices[0]?.message?.content?.trim();
           if (!content) throw new Error("DeepSeek 返回了空内容");
           lastContent = content;
@@ -134,32 +224,23 @@ export class Analyzer {
       throw new Error(`DeepSeek 结构化分析失败：${lastError?.message || "未知错误"}`);
     }
 
-    const response = await this.client.responses.parse({
+    const response = await this.instrument("项目分析", { projectName, chatId, attempt: 1 }, () => this.client.responses.parse({
       model: this.model,
       input: [
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: `${SYSTEM_PROMPT}\n${TOPIC_SNAPSHOT_RULES}` },
         { role: "user", content: JSON.stringify(payload) }
       ],
       text: { format: zodTextFormat(ProjectActivityAnalysis, "project_activity_analysis") }
-    });
+    }));
     if (!response.output_parsed) throw new Error("OpenAI 没有返回结构化分析结果");
     return response.output_parsed;
   }
 
   async summarizeNotification({ projectName, chatName, messages }) {
-    const payload = {
-      project: projectName,
-      chat_name: chatName,
-      messages: messages.map((message) => ({
-        message_id: message.message_id,
-        sender_open_id: message.sender_id,
-        create_time: message.create_time,
-        content: message.content
-      }))
-    };
+    const payload = buildNotificationPayload({ projectName, chatName, messages });
 
     if (this.provider === "deepseek") {
-      const response = await this.client.chat.completions.create({
+      const response = await this.instrument("通知摘要", { projectName, chatName, attempt: 1 }, () => this.client.chat.completions.create({
         model: this.model,
         messages: [
           { role: "system", content: NOTIFICATION_SUMMARY_TEMPLATE },
@@ -167,21 +248,49 @@ export class Analyzer {
         ],
         response_format: { type: "json_object" },
         max_tokens: 3000
-      });
+      }));
       const content = response.choices[0]?.message?.content?.trim();
       if (!content) throw new Error("DeepSeek 返回了空通知摘要");
       return NotificationSummary.parse(JSON.parse(content));
     }
 
-    const response = await this.client.responses.parse({
+    const response = await this.instrument("通知摘要", { projectName, chatName, attempt: 1 }, () => this.client.responses.parse({
       model: this.model,
       input: [
         { role: "system", content: NOTIFICATION_SUMMARY_TEMPLATE },
         { role: "user", content: JSON.stringify(payload) }
       ],
       text: { format: zodTextFormat(NotificationSummary, "notification_summary") }
-    });
+    }));
     if (!response.output_parsed) throw new Error("OpenAI 没有返回通知摘要");
+    return response.output_parsed;
+  }
+
+  async evaluateWorkStyle({ memberOpenId, facts }) {
+    const payload = { member_open_id: memberOpenId, confirmed_facts: facts };
+    if (this.provider === "deepseek") {
+      const response = await this.instrument("成员工作风格周评估", { memberOpenId, attempt: 1 }, () => this.client.chat.completions.create({
+        model: this.model,
+        messages: [
+          { role: "system", content: WORK_STYLE_PROMPT },
+          { role: "user", content: JSON.stringify(payload) }
+        ],
+        response_format: { type: "json_object" },
+        max_tokens: 5000
+      }));
+      const content = response.choices[0]?.message?.content?.trim();
+      if (!content) throw new Error("DeepSeek 返回了空成员观察");
+      return WorkStyleEvaluationBatch.parse(JSON.parse(content));
+    }
+    const response = await this.instrument("成员工作风格周评估", { memberOpenId, attempt: 1 }, () => this.client.responses.parse({
+      model: this.model,
+      input: [
+        { role: "system", content: WORK_STYLE_PROMPT },
+        { role: "user", content: JSON.stringify(payload) }
+      ],
+      text: { format: zodTextFormat(WorkStyleEvaluationBatch, "work_style_evaluation") }
+    }));
+    if (!response.output_parsed) throw new Error("OpenAI 没有返回成员观察");
     return response.output_parsed;
   }
 }

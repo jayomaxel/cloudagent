@@ -133,6 +133,38 @@ const tableDefinitions = [
     ]
   },
   {
+    name: "Agent 群聊话题快照",
+    fields: [
+      { name: "快照ID", type: "text" },
+      { name: "快照标题", type: "text" },
+      { name: "话题类型", type: "select", multiple: false, options: [
+        { name: "进展同步" }, { name: "问题卡点" }, { name: "待办推进" }, { name: "决策讨论" },
+        { name: "资源协调" }, { name: "知识沉淀" }, { name: "风险提醒" }, { name: "综合讨论" }
+      ] },
+      { name: "一句话总结", type: "text" },
+      { name: "群聊ID", type: "text" },
+      { name: "群聊名称", type: "text" },
+      { name: "所属项目", type: "text" },
+      { name: "明确进展", type: "text" },
+      { name: "当前卡点", type: "text" },
+      { name: "待办事项", type: "text" },
+      { name: "待确认问题", type: "text" },
+      { name: "后续建议", type: "text" },
+      { name: "相关成员ID", type: "text" },
+      { name: "来源消息ID", type: "text" },
+      { name: "消息数量", type: "number" },
+      { name: "讨论开始时间", type: "datetime" },
+      { name: "讨论结束时间", type: "datetime" },
+      { name: "置信度", type: "number" },
+      { name: "是否需要人工审核", type: "checkbox" },
+      { name: "处理状态", type: "select", multiple: false, options: [
+        { name: "待确认" }, { name: "已确认" }, { name: "已修正" }, { name: "已归档" }, { name: "已忽略" }
+      ] },
+      { name: "生成时间", type: "datetime" },
+      { name: "Agent版本", type: "text" }
+    ]
+  },
+  {
     name: "项目成员关系",
     fields: [
       { name: "关系名称", type: "text" },
